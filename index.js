@@ -7,6 +7,8 @@
 var request = require('request') // makes HTTP requests
 const errHandler = require('./errPresets.js') // reqjs-err-handler error presets
 const EventEmitter = require('events') // emit 'ready' event
+const { response } = require('express')
+const { parse } = require('path')
 
 var meta = {
   version: '2.0.0',
@@ -22,107 +24,6 @@ var meta = {
   (un)read notification: individual read state of a single notification. NOTE: read state is different from the unseen count
 */
 
-// class definitions:
-
-/**
-  * @classdesc Represents a single course. All courses belong to a {@link Term}.
-  * @name Course
-  * @class
-
-  * @property {string} name
-  * @property {string} courseNumber
-  * @property {string} teacher
-  * @property {string} roomName
-  * @property {string} _id - unique id for the course
-
-  * @property {object} grades - grades for the course
-  * @property {number} grades.percent
-  * @property {number} grades.pointsEarned
-  * @property {string} grades.score - letter grade
-  * @property {number} grades.totalPoints
-
-  * @property {object} placement - when the class takes place
-  * @property {string} placement.startTime
-  * @property {string} placement.endTime
-  * @property {string} placement.periodName - the name of the period
-  * @property {string} placement.periodSeq  - the order of when the period takes place in the day
-
-  * @example
-  * {
-  *  "name": "2 English II",
-  *  "courseNumber": "000703",
-  *  "teacher": "John Doe",
-  *  "roomName": "205B",
-  *  "_id": "6278079",
-  *  "grades": {
-  *    "score": "A-",
-  *    "percent": 89.76,
-  *    "totalPoints": 227,
-  *    "pointsEarned": 207
-  *  },
-  *  "placement": {
-  *    "periodName": "6",
-  *    "periodSeq": 7,
-  *    "startTime": "14:00:00",
-  *    "endTime": "15:00:00"
-  *  }
-  * }
-  *
-*/
-
-/**
-  * @classdesc Represents a term. A term is a way of dividing up the school year. They may be organized as quarters, semesters, trimesters, etc. A term will have a start and end date, and will contain courses.
-  * @name Term
-  * @class
-
-  * @property {string} startDate
-  * @property {string} endDate
-  * @property {string} name
-  * @property {number} seq - Term sequence. Use this number if you want to sort terms. For example, in a school that uses quarters the first quarter would be `seq: 1` while the second quarter would be `seq: 2`.
-  * @property {Course[]} courses - array of courses contained in the term
-*/
-
-/**
-  * @classdesc Type representing a notification. A user might get a notification for many reasons, but they are mostly for attendance, course, and grade updates.
-  * @name Notification
-  * @class
-
-  * @property {string} id - unique notification id
-  * @property {string} link - link to redirect to when clicked
-  * @property {boolean} read - bool representing if the notification has been marked read or not
-  * @property {string} text - notification text
-  * @property {integer} timestamp - unix timestamp
-  * @property {string} timestampText - timestamp in text form
-  * @property {number} type - type of notification. The exact type definitions aren't known and more research has to be done. But right now the following is known:
-  * 2 - attendance updated (eg. you get marked tardy), 3 - course grade updated (eg. your class grade changes after an assignment is graded), 4 - assignment updated
-  * (eg. an assignment is graded or its state is updated as missing, late, etc )
-*/
-
-/**
- * @method toggleRead
- * @memberOf Notification
- * @instance
- * @description Toggles the read state of a notification
- * @example
- * const InfiniteCampus = require('infinite-campus')
- * const user = new InfiniteCampus('New York District', 'NY', 'JDoe12', 'XXXXXX')
- *
- *  // wait until we are done logging in
- *  user.on('ready', () => {
- *    // user is authenticated, now we can get notifications
- *    user.getNotifications().then((notifications) => {
- *      // if the first notification is unread
- *      if (notification[0].read === false){
- *        // mark it as read by toggling its read state
- *        notifications[0].toggleRead()
- *      }
- *    }
- *  })
- */
-
-/**
- * Class representing an authenticated Infinite Campus user
- */
 class User extends EventEmitter {
   /**
    * Fired when the user is authenticated and ready to make API calls
@@ -246,27 +147,19 @@ class User extends EventEmitter {
     })
   }
 
-  /**
-   * Fetches data for all courses a user is enrolled in. This method returns information about all terms, all courses, all grades for those courses,
-   * as well as all time placement data for those courses. See documentation for the [Term]{@link Term} and [Course]{@link Course} types for more information on what this method specifically returns. <br>
-   * @async
-   * @returns {Term[]} array of terms containing courses
-   * @example
-   * const InfiniteCampus = require('infinite-campus')
-   * const user = new InfiniteCampus('New York District', 'NY', 'JDoe12', 'XXXXXX')
-   *
-   * // wait until we are done logging in
-   * user.on('ready', () => {
-   *   // now that we are logged in, fetch courses
-   *   user.getCourses().then((courses) => {
-   *     console.log(courses)
-   *   })
-   * })
-   *
-   */
+  //bit of a mess, but it works
+  /*
+    Pulls the following data relating to the student:
+    - courses
+    - grades
+    - attendance
+    - assignments
+    - term details
+  */
   getCourses(schoolID) {
     return new Promise((resolve, reject) => {
       checkAuth.call(this)
+
       // fetch roster with placements
       request(this.district.district_baseurl + 'resources/portal/roster?_expand=%7BsectionPlacements-%7Bterm%7D%7D', (err, res, body) => {
         errHandler.generic200.handle(err, res, body)
@@ -275,18 +168,16 @@ class User extends EventEmitter {
         // fetch grades
         request(this.district.district_baseurl + 'resources/portal/grades', (err, res, body) => {
           errHandler.generic200.handle(err, res, body)
-          let grades = JSON.parse(body)
+          let data = JSON.parse(body)
 
           let result = [] // object that we return later
           let crossReference = {}
 
-          let schoolIndex
+          let schoolIndex = 0;
 
-          // if we are enrolled in multiple schools
-          if (grades.length > 1) {
-            // build list of schools
+          if (data.length > 1) {
             let schools = []
-            grades.forEach((school) => {
+            data.forEach((school) => {
               schools.push({
                 schoolName: school.displayName,
                 id: school.schoolID,
@@ -297,12 +188,12 @@ class User extends EventEmitter {
 
             // throw warning is schoolID isn't specifed
             if (schoolID === undefined) {
-              console.warn(`WARNING: You are enrolled in ${grades.length} schools, please explicitly specify a school ID to fetch courses from. Please see the below output to see which schoolID to use. (Defaulting to the first school returned by I.C. API - name: '${schools[0].schoolName}' - id: ${schools[0].id})`, schools)
+              console.warn(`WARNING: You are enrolled in ${data.length} schools, please explicitly specify a school ID to fetch courses from. Please see the below output to see which schoolID to use. (Defaulting to the first school returned by I.C. API - name: '${schools[0].schoolName}' - id: ${schools[0].id})`, schools)
               // default to first in array
               schoolIndex = 0
             } else {
               // find index from schoolID
-              grades.forEach((school, i) => {
+              data.forEach((school, i) => {
                 if (school.schoolID == schoolID) {
                   schoolIndex = i
                 }
@@ -314,8 +205,8 @@ class User extends EventEmitter {
 
           }
 
-          // loop over terms from /grades
-          grades[schoolIndex].terms.forEach((term, i) => {
+          // loop over terms from grades
+          data[schoolIndex].terms.forEach((term, i) => {
             let termResult = {
               name: term.termName,
               seq: term.termSeq,
@@ -326,7 +217,8 @@ class User extends EventEmitter {
 
             // loop over classes in a term
             term.courses.forEach((course, ii) => {
-              let grade = course.gradingTasks[0]
+              //i represents quarter/term, ii represents class in that term
+              let grade = course.gradingTasks[1]
 
               let courseResult = {
                 name: course.courseName,
@@ -340,8 +232,12 @@ class User extends EventEmitter {
                   totalPoints: (grade.progressTotalPoints !== undefined) ? grade.progressTotalPoints : grade.totalPoints,
                   pointsEarned: (grade.progressPointsEarned !== undefined) ? grade.progressPointsEarned : grade.pointsEarned
                 },
+                assignments: [
+                ],
+                attendance: {
+                },
                 comments: grade.comments,
-                _id: course._id
+                _id: course.sectionID
               }
 
               // remove grades for courses without grades
@@ -362,6 +258,7 @@ class User extends EventEmitter {
             })
 
             // push terms to final array
+            //console.log(termResult)
             result.push(termResult)
           })
 
@@ -397,6 +294,100 @@ class User extends EventEmitter {
             //   term.endDate = placement.term.endDate
             // }
           })
+
+          request(this.district.district_baseurl + 'api/portal/students', (err, res, body) => {
+            errHandler.generic200.handle(err, res, body)
+            let data = JSON.parse(body)
+    
+            let enrollmentID = data[0].enrollments[0].enrollmentID
+            
+            request(this.district.district_baseurl + `resources/portal/attendance/${enrollmentID}?courseSummary=true`, (err, res, body) => {
+              errHandler.generic200.handle(err, res, body)
+              let data = JSON.parse(body)
+
+              for (var i = 0; i < data.terms.length; i++) { // term
+                for (var j = 0; j < data.terms[i].courses.length; j++) { // courses
+                  let attendanceData = {
+                    absences: data.terms[i].courses[j].absentList.length,
+                    tardies: data.terms[i].courses[j].tardyList.length,
+                  }
+
+                  result[i].courses[j].attendance = attendanceData
+                }
+              }
+            })
+          })
+
+          //before we resolve, we must add assignment data to each course
+          //go through each array element of result and examine start/enddate. if the current date is between the start and end date, then we need to move our index to that element
+          //then, we need to make a request to the assignments api for that course
+          
+          var ids = []
+
+          for (var i = 0; i < result.length; i++) {
+            let currentDate = new Date()
+            let startDate = new Date(result[i].startDate)
+            let endDate = new Date(result[i].endDate)
+            if (currentDate >= startDate && currentDate <= endDate) {
+              //we are in the correct term
+              for (var j = 0; j < result[i].courses.length; j++) {
+                ids.push(result[i].courses[j]._id)
+              }
+              break;
+            }
+          }
+
+          console.log(ids)
+
+          for (var i = 0; i < ids.length; i++) {
+            request(this.district.district_baseurl + `resources/portal/grades/detail/${ids[i]}?showAllTerms=true`, (err, res, body) => {
+              errHandler.generic200.handle(err,res,body)
+              let data = JSON.parse(body)
+              let assignments = []
+
+              let assignmentIndex = 0
+              data.details.forEach((element) => {
+                if (element.categories.length > 0) {
+                  console.log("element has assignments")
+                  
+                  element.categories.forEach((category) => {
+                    category.assignments.forEach((assignment) => {
+                      let assignmentResult = {
+                        _idTerm: assignment.sectionID,
+                        _id: assignmentIndex,
+                        termSeq: element.task.termSeq,
+                        category: category.name,
+                        weight: parseFloat(category.weight),
+                        name: assignment.assignmentName,
+                        assigned: assignment.assignedDate,
+                        due: assignment.dueDate,
+                        gradedDate: assignment.scoreModifiedDate,
+                        score: parseFloat(assignment.score),
+                        earnedPoints: parseFloat(assignment.scorePoints),
+                        totalPoints: parseFloat(assignment.totalPoints),
+                        missing: assignment.missing,
+                        late: assignment.late,
+                        isGraded: !assignment.notGraded
+                      }
+  
+                      assignmentIndex++
+                      assignments.push(assignmentResult)
+                    })
+                  })
+                }
+              })
+
+              for (var j = 0; j < assignments.length; j++) {
+                for (var k = 0; k < result[assignments[j].termSeq - 1].courses.length; k++) {
+                  if (assignments[j]._idTerm == result[assignments[j].termSeq - 1].courses[k]._id) {
+                    result[assignments[j].termSeq - 1].courses[k].assignments = assignments
+                  }
+                }
+              }
+            })
+          }
+
+          
 
           resolve(result)
         })
